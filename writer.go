@@ -2,14 +2,19 @@ package arc
 
 import (
 	"bytes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
 	_ "embed"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
 	"time"
 
+	"github.com/bernardo1r/encdec"
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 const (
@@ -22,9 +27,13 @@ const (
 		encrypted
 	) VALUES (?, ?, ?, ?, ?, ?)`
 
-	queryGetFileId = `SELECT id FROM metadata WHERE name = ?`
-
 	queryInsertData = `INSERT INTO data VALUES (?, ?, ?)`
+
+	queryInsertEncryptedMetadata = `INSERT INTO encryption_metadata VALUES (?, ?)`
+
+	queryInsertPasswordParamas = `INSERT INTO encryption_key_params VALUES (?)`
+
+	queryGetFileId = `SELECT id FROM metadata WHERE name = ?`
 
 	queryUpdateMetadata = `UPDATE metadata SET size = ?, blocks = ? WHERE id = ?`
 )
@@ -33,11 +42,16 @@ const (
 // within the container.
 const DefaultBlocksize = 8 * (1 << 10) // 8 KiB
 
+const encryptionKeysize = 32
+
 //go:embed ddl.sql
 var queryDDL []byte
 
 // ErrWriterClosed is returned when Writer is used after closed.
-var ErrWriterClosed = errors.New("writer closed")
+var (
+	ErrWriterClosed = errors.New("writer closed")
+	ErrNoPassword   = errors.New("attempt to encrypt file with no password")
+)
 
 // Header represents a file in the arc file.
 type Header struct {
@@ -58,7 +72,7 @@ type Header struct {
 	// against the zero value (0).
 	Compression zstd.EncoderLevel
 
-	// Encryption indicates if file is encrypted.
+	// Encryption indicates if file is encrypted or not.
 	Encryption bool
 
 	// Transaction indicates if all the blocks of the file
@@ -87,6 +101,8 @@ type Writer struct {
 	db                    *sql.DB
 	currDataWriter        *dataWriter
 	currCompressionWriter *zstd.Encoder
+	encryptionKey         []byte
+	currEncryptionWriter  *encdec.Writer
 	err                   error
 }
 
@@ -105,12 +121,39 @@ func prepareDB(databasePath string, databaseArgs string) (*sql.DB, error) {
 	return db, err
 }
 
+func (writer *Writer) createEncryptionKey(password []byte) error {
+	var params encdec.Params
+	writer.encryptionKey, writer.err = encdec.Key(password, &params)
+	if writer.err != nil {
+		return writer.err
+	}
+
+	var paramsString []byte
+	paramsString, writer.err = params.MarshalHeader()
+	if writer.err != nil {
+		return writer.err
+	}
+	_, writer.err = writer.db.Exec(queryInsertPasswordParamas, paramsString)
+	return writer.err
+}
+
 // NewWriter creates a new Writer and a container file with name databasePath.
-func NewWriter(databasePath string, databaseArgs string, blocksize int) (*Writer, error) {
+func NewWriter(databasePath string, databaseArgs string, blocksize int, password []byte) (*Writer, error) {
 	writer := new(Writer)
 	writer.blocksize = blocksize
 	writer.db, writer.err = prepareDB(databasePath, databaseArgs)
-	return writer, writer.err
+	if writer.err != nil {
+		return nil, writer.err
+	}
+
+	if password != nil {
+		err := writer.createEncryptionKey(password)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return writer, nil
 }
 
 func (writer *Writer) flush() error {
@@ -124,6 +167,14 @@ func (writer *Writer) flush() error {
 			return writer.err
 		}
 	}
+
+	if writer.currEncryptionWriter != nil {
+		writer.err = writer.currEncryptionWriter.Close()
+		if writer.err != nil {
+			return writer.err
+		}
+	}
+
 	writer.err = writer.currDataWriter.Close()
 	if writer.err != nil {
 		return writer.err
@@ -136,6 +187,36 @@ func (writer *Writer) flush() error {
 		writer.currDataWriter.id,
 	)
 	return writer.err
+}
+
+func (writer *Writer) createFileEncryptionKey(id int) ([]byte, error) {
+	if writer.encryptionKey == nil {
+		return nil, ErrNoPassword
+	}
+
+	key := make([]byte, encryptionKeysize)
+	_, writer.err = rand.Read(key)
+	if writer.err != nil {
+		return nil, writer.err
+	}
+
+	var aead cipher.AEAD
+	aead, writer.err = chacha20poly1305.New(writer.encryptionKey)
+	if writer.err != nil {
+		return nil, writer.err
+	}
+
+	nonce := make([]byte, chacha20poly1305.NonceSize)
+	binary.BigEndian.PutUint64(nonce, uint64(id))
+	encryptedKey := make([]byte, 0, encryptionKeysize+chacha20poly1305.Overhead)
+	encryptedKey = aead.Seal(encryptedKey, nonce, key, nil)
+
+	_, writer.err = writer.db.Exec(queryInsertEncryptedMetadata, id, encryptedKey)
+	if writer.err != nil {
+		return nil, writer.err
+	}
+
+	return key, nil
 }
 
 // WriteHeader prepares the Writer for writing the file described by header.
@@ -175,6 +256,22 @@ func (writer *Writer) WriteHeader(header *Header) error {
 	if writer.err != nil {
 		return writer.err
 	}
+	writer.writer = writer.currDataWriter
+
+	if header.Encryption {
+		key, err := writer.createFileEncryptionKey(id)
+		if err != nil {
+			return err
+		}
+		var params encdec.Params
+		writer.currEncryptionWriter, writer.err = encdec.NewWriter(key, writer.writer, &params)
+		if writer.err != nil {
+			return writer.err
+		}
+		writer.writer = writer.currEncryptionWriter
+	} else {
+		writer.currEncryptionWriter = nil
+	}
 
 	if header.Compression != 0 {
 		writer.currCompressionWriter, writer.err = zstd.NewWriter(
@@ -183,7 +280,6 @@ func (writer *Writer) WriteHeader(header *Header) error {
 		)
 		writer.writer = writer.currCompressionWriter
 	} else {
-		writer.writer = writer.currDataWriter
 		writer.currCompressionWriter = nil
 	}
 

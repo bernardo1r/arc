@@ -16,8 +16,12 @@ CREATE TABLE data(
 	PRIMARY KEY (id, block_id)
 );
 
-CREATE TABLE encrypted_metadata(
+CREATE TABLE encryption_metadata(
 	id INTEGER PRIMARY KEY CHECK(typeof(id) = "integer"),
-	salt BLOB NOT NULL CHECK(typeof(salt) = "blob"),
+	key BLOB UNIQUE NOT NULL CHECK(typeof(key) = "blob"),
 	FOREIGN KEY (id) REFERENCES metadata(id) ON DELETE CASCADE
+);
+
+CREATE TABLE encryption_key_params(
+	params BLOB PRIMARY KEY CHECK(typeof(params) = "blob")
 );

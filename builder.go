@@ -17,7 +17,7 @@ type Builder struct {
 	writer      *Writer
 	blockSize   int
 	compression zstd.EncoderLevel
-	encryption  bool
+	password    []byte
 	err         error
 }
 
@@ -27,16 +27,16 @@ type BuilderOption func(*Builder)
 // WithCompressionLevel specifies a compression level to
 // be applied for all files written in the container.
 func WithCompressionLevel(level zstd.EncoderLevel) BuilderOption {
-	return func(encoder *Builder) {
-		encoder.compression = level
+	return func(builder *Builder) {
+		builder.compression = level
 	}
 }
 
-// WithEncryption will use password as the password for
+// WithPassword will use password as the password for
 // all files written in the container
-func WithEncryption(password []byte) BuilderOption {
-	return func(encoder *Builder) {
-		encoder.encryption = true
+func WithPassword(password []byte) BuilderOption {
+	return func(builder *Builder) {
+		builder.password = password
 	}
 }
 
@@ -50,7 +50,7 @@ func NewBuilder(databasePath string, databaseArgs string, options ...BuilderOpti
 	}
 
 	var err error
-	builder.writer, err = NewWriter(databasePath, databaseArgs, DefaultBlocksize)
+	builder.writer, err = NewWriter(databasePath, databaseArgs, DefaultBlocksize, builder.password)
 	return builder, err
 }
 
@@ -61,6 +61,7 @@ func (builder Builder) InsertFile(path string) error {
 		&Header{
 			Name:        filepath.Base(path),
 			Compression: builder.compression,
+			Encryption:  builder.password != nil,
 		},
 		path,
 	)

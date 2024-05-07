@@ -66,6 +66,7 @@ func main() {
 		filepath.Base(folderPath)+dbExtesion,
 		dbArgs,
 		arc.WithCompressionLevel(zstd.SpeedBetterCompression),
+		arc.WithPassword([]byte("hello motto")),
 	)
 	checkError(err)
 	defer func() {
