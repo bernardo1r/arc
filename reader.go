@@ -24,11 +24,7 @@ const (
 
 	queryFileEncryptionKeyById = `SELECT key FROM encryption_metadata WHERE id = ?`
 
-	queryDataByPK = `SELECT data.data FROM data WHERE id = ? and block_id = ?`
-
-	queryBlockSizeById = `SELECT LENGTH(data.data) FROM data WHERE id = ?, block_id = 0`
-
-	queryMaxBlockById = `SELECT blocks FROM metadata WHERE id = ?`
+	queryDataById = `SELECT data.data FROM data WHERE id = ? ORDER BY block_id ASC`
 )
 
 type Reader struct {
@@ -182,7 +178,7 @@ func (reader *Reader) ReadToFile(id int, filepath string) (err error) {
 		return reader.err
 	}
 
-	if reader.Open(id, false) != nil {
+	if reader.Open(id, true) != nil {
 		return reader.err
 	}
 
@@ -217,18 +213,17 @@ func (reader *Reader) Read(p []byte) (int, error) {
 
 type dataReader struct {
 	transaction *sql.Tx
-	statement   *sql.Stmt
 	id          int
 	currBlock   int
-	maxBlock    int
+	lastBlock   bool
+	rows        *sql.Rows
 	buffer      *bytes.Buffer
 	err         error
 }
 
-func maxBlockById(db *sql.DB, id int) (int, error) {
-	var maxBlock int
-	err := db.QueryRow(queryMaxBlockById, id).Scan(&maxBlock)
-	return maxBlock - 1, err
+func openRows(db *sql.DB, id int) (*sql.Rows, error) {
+	rows, err := db.Query(queryDataById, id)
+	return rows, err
 }
 
 func newDataReader(db *sql.DB, id int, transaction bool) (*dataReader, error) {
@@ -238,20 +233,14 @@ func newDataReader(db *sql.DB, id int, transaction bool) (*dataReader, error) {
 	}
 
 	var err error
-	dreader.maxBlock, err = maxBlockById(db, id)
-	if err != nil {
-		return nil, err
-	}
-
 	if transaction {
 		dreader.transaction, err = db.Begin()
 		if err != nil {
 			return nil, err
 		}
-		dreader.statement, err = dreader.transaction.Prepare(queryDataByPK)
-	} else {
-		dreader.statement, err = db.Prepare(queryDataByPK)
 	}
+
+	dreader.rows, err = openRows(db, id)
 	if err != nil {
 		dreader.cleanup()
 		return nil, err
@@ -261,8 +250,9 @@ func newDataReader(db *sql.DB, id int, transaction bool) (*dataReader, error) {
 }
 
 func (dreader *dataReader) readChunk() error {
-	var buffer []byte
-	dreader.err = dreader.statement.QueryRow(dreader.id, dreader.currBlock).Scan(&buffer)
+	dreader.lastBlock = !dreader.rows.Next()
+	var buffer sql.RawBytes
+	dreader.rows.Scan(&buffer)
 	dreader.buffer = bytes.NewBuffer(buffer)
 	dreader.currBlock++
 	return dreader.err
@@ -271,6 +261,9 @@ func (dreader *dataReader) readChunk() error {
 func (dreader *dataReader) cleanup() {
 	if dreader.transaction != nil {
 		dreader.transaction.Rollback()
+	}
+	if dreader.rows != nil {
+		dreader.rows.Close()
 	}
 }
 
@@ -282,7 +275,7 @@ func (dreader *dataReader) Read(p []byte) (int, error) {
 	var total int
 	for len(p) > 0 {
 		if dreader.buffer.Len() == 0 {
-			if dreader.currBlock > dreader.maxBlock {
+			if dreader.lastBlock {
 				dreader.err = io.EOF
 				dreader.cleanup()
 				if total == 0 {
