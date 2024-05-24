@@ -27,13 +27,13 @@ const (
 		encrypted
 	) VALUES (?, ?, ?, ?, ?, ?)`
 
-	queryInsertData = `INSERT INTO data VALUES (?, ?, ?)`
-
 	queryInsertEncryptedMetadata = `INSERT INTO encryption_metadata VALUES (?, ?)`
 
-	queryInsertPasswordParamas = `INSERT INTO encryption_key_params VALUES (?)`
+	queryInsertData = `INSERT INTO data VALUES (?, ?, ?)`
 
-	queryGetFileId = `SELECT id FROM metadata WHERE name = ?`
+	queryInsertEncryptionKeyParams = `INSERT INTO encryption_key_params VALUES (?)`
+
+	queryIdByName = `SELECT id FROM metadata WHERE name = ?`
 
 	queryUpdateMetadata = `UPDATE metadata SET size = ?, blocks = ? WHERE id = ?`
 )
@@ -51,12 +51,25 @@ var queryDDL []byte
 var (
 	ErrWriterClosed = errors.New("writer closed")
 	ErrNoPassword   = errors.New("attempt to encrypt file with no password")
+	ErrNoFilename   = errors.New("attempt to create file with no name")
 )
 
 // Header represents a file in the arc file.
 type Header struct {
+	// Id of the file in the container.
+	//
+	// The Id is only relevent for the [Reader],
+	// and thereby ignored by the [Writer].
+	Id int
+
 	// Name of the file.
 	Name string
+
+	// Size, in bytes, of the file, outside the container.
+	//
+	// As the [Header.Id] field, this field is too ignored
+	// by the [Writer].
+	Size int
 
 	// ModTime is the last time the file was modified,
 	// in UTC location.
@@ -74,15 +87,11 @@ type Header struct {
 
 	// Encryption indicates if file is encrypted or not.
 	Encryption bool
-
-	// Transaction indicates if all the blocks of the file
-	// will be written in a single transaction.
-	Transaction bool
 }
 
 func (header *Header) check() error {
 	if header.Name == "" {
-		return errors.New("file name cannot be empty")
+		return ErrNoFilename
 	}
 	var defaultVal time.Time
 	if header.ModTime == defaultVal {
@@ -95,8 +104,8 @@ func (header *Header) check() error {
 // a new file with the providaded [Header], and then Writer can be used as an
 // io.Writer.
 type Writer struct {
-	writer                io.WriteCloser
-	bytesRead             int
+	currWriter            io.WriteCloser
+	currBytesRead         int
 	blocksize             int
 	db                    *sql.DB
 	currDataWriter        *dataWriter
@@ -133,7 +142,7 @@ func (writer *Writer) createEncryptionKey(password []byte) error {
 	if writer.err != nil {
 		return writer.err
 	}
-	_, writer.err = writer.db.Exec(queryInsertPasswordParamas, paramsString)
+	_, writer.err = writer.db.Exec(queryInsertEncryptionKeyParams, paramsString)
 	return writer.err
 }
 
@@ -182,7 +191,7 @@ func (writer *Writer) flush() error {
 
 	_, writer.err = writer.db.Exec(
 		queryUpdateMetadata,
-		writer.bytesRead,
+		writer.currBytesRead,
 		writer.currDataWriter.currBlock,
 		writer.currDataWriter.id,
 	)
@@ -208,8 +217,7 @@ func (writer *Writer) createFileEncryptionKey(id int) ([]byte, error) {
 
 	nonce := make([]byte, chacha20poly1305.NonceSize)
 	binary.BigEndian.PutUint64(nonce, uint64(id))
-	encryptedKey := make([]byte, 0, encryptionKeysize+chacha20poly1305.Overhead)
-	encryptedKey = aead.Seal(encryptedKey, nonce, key, nil)
+	encryptedKey := aead.Seal(nil, nonce, key, nil)
 
 	_, writer.err = writer.db.Exec(queryInsertEncryptedMetadata, id, encryptedKey)
 	if writer.err != nil {
@@ -220,7 +228,7 @@ func (writer *Writer) createFileEncryptionKey(id int) ([]byte, error) {
 }
 
 // WriteHeader prepares the Writer for writing the file described by header.
-func (writer *Writer) WriteHeader(header *Header) error {
+func (writer *Writer) WriteHeader(header *Header, transaction bool) error {
 	if writer.err != nil {
 		return writer.err
 	}
@@ -247,16 +255,16 @@ func (writer *Writer) WriteHeader(header *Header) error {
 	}
 
 	var id int
-	writer.err = writer.db.QueryRow(queryGetFileId, header.Name).Scan(&id)
+	writer.err = writer.db.QueryRow(queryIdByName, header.Name).Scan(&id)
 	if writer.err != nil {
 		return writer.err
 	}
 
-	writer.currDataWriter, writer.err = newDataWriter(writer.db, id, writer.blocksize, header.Transaction)
+	writer.currDataWriter, writer.err = newDataWriter(writer.db, id, writer.blocksize, transaction)
 	if writer.err != nil {
 		return writer.err
 	}
-	writer.writer = writer.currDataWriter
+	writer.currWriter = writer.currDataWriter
 
 	if header.Encryption {
 		key, err := writer.createFileEncryptionKey(id)
@@ -264,21 +272,21 @@ func (writer *Writer) WriteHeader(header *Header) error {
 			return err
 		}
 		var params encdec.Params
-		writer.currEncryptionWriter, writer.err = encdec.NewWriter(key, writer.writer, &params)
+		writer.currEncryptionWriter, writer.err = encdec.NewWriter(key, writer.currWriter, &params)
 		if writer.err != nil {
 			return writer.err
 		}
-		writer.writer = writer.currEncryptionWriter
+		writer.currWriter = writer.currEncryptionWriter
 	} else {
 		writer.currEncryptionWriter = nil
 	}
 
 	if header.Compression != 0 {
 		writer.currCompressionWriter, writer.err = zstd.NewWriter(
-			writer.currDataWriter,
+			writer.currWriter,
 			zstd.WithEncoderLevel(header.Compression),
 		)
-		writer.writer = writer.currCompressionWriter
+		writer.currWriter = writer.currCompressionWriter
 	} else {
 		writer.currCompressionWriter = nil
 	}
@@ -293,8 +301,7 @@ func (writer *Writer) WriteFile(header *Header, filepath string) (err error) {
 		return writer.err
 	}
 
-	header.Transaction = true
-	if writer.WriteHeader(header) != nil {
+	if writer.WriteHeader(header, true) != nil {
 		return writer.err
 	}
 
@@ -312,8 +319,8 @@ func (writer *Writer) WriteFile(header *Header, filepath string) (err error) {
 	}()
 
 	var read int64
-	read, writer.err = io.Copy(writer.writer, file)
-	writer.bytesRead = int(read)
+	read, writer.err = io.Copy(writer.currWriter, file)
+	writer.currBytesRead = int(read)
 	if writer.err != nil {
 		return writer.err
 	}
@@ -331,8 +338,8 @@ func (writer *Writer) Write(p []byte) (int, error) {
 	}
 
 	var read int
-	read, writer.err = writer.writer.Write(p)
-	writer.bytesRead += read
+	read, writer.err = writer.currWriter.Write(p)
+	writer.currBytesRead += read
 	return read, writer.err
 }
 
