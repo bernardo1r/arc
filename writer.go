@@ -49,9 +49,9 @@ var queryDDL []byte
 
 // ErrWriterClosed is returned when Writer is used after closed.
 var (
-	ErrWriterClosed = errors.New("writer closed")
-	ErrNoPassword   = errors.New("attempt to encrypt file with no password")
-	ErrNoFilename   = errors.New("attempt to create file with no name")
+	ErrWriterClosed  = errors.New("writer closed")
+	ErrEmptyPassword = errors.New("attempt to encrypt file with no password")
+	ErrNoFilename    = errors.New("attempt to create file with no name")
 )
 
 // Header represents a file in the arc file.
@@ -104,15 +104,13 @@ func (header *Header) check() error {
 // a new file with the providaded [Header], and then Writer can be used as an
 // io.Writer.
 type Writer struct {
-	currWriter            io.WriteCloser
-	currBytesRead         int
-	blocksize             int
-	db                    *sql.DB
-	currDataWriter        *dataWriter
-	currCompressionWriter *zstd.Encoder
-	encryptionKey         []byte
-	currEncryptionWriter  *encdec.Writer
-	err                   error
+	blocksize      int
+	encryptionKey  []byte
+	db             *sql.DB
+	currWriters    []io.WriteCloser
+	currBytesRead  int
+	currDataWriter *dataWriter
+	err            error
 }
 
 func prepareDB(databasePath string, databaseArgs string) (*sql.DB, error) {
@@ -166,27 +164,15 @@ func NewWriter(databasePath string, databaseArgs string, blocksize int, password
 }
 
 func (writer *Writer) flush() error {
-	if writer.currDataWriter == nil {
+	if writer.currWriters == nil {
 		return nil
 	}
 
-	if writer.currCompressionWriter != nil {
-		writer.err = writer.currCompressionWriter.Close()
+	for i := len(writer.currWriters) - 1; i >= 0; i-- {
+		writer.err = writer.currWriters[i].Close()
 		if writer.err != nil {
 			return writer.err
 		}
-	}
-
-	if writer.currEncryptionWriter != nil {
-		writer.err = writer.currEncryptionWriter.Close()
-		if writer.err != nil {
-			return writer.err
-		}
-	}
-
-	writer.err = writer.currDataWriter.Close()
-	if writer.err != nil {
-		return writer.err
 	}
 
 	_, writer.err = writer.db.Exec(
@@ -195,12 +181,15 @@ func (writer *Writer) flush() error {
 		writer.currDataWriter.currBlock,
 		writer.currDataWriter.id,
 	)
+
+	writer.currWriters = nil
+	writer.currDataWriter = nil
 	return writer.err
 }
 
 func (writer *Writer) createFileEncryptionKey(id int) ([]byte, error) {
 	if writer.encryptionKey == nil {
-		return nil, ErrNoPassword
+		return nil, ErrEmptyPassword
 	}
 
 	key := make([]byte, encryptionKeysize)
@@ -260,35 +249,40 @@ func (writer *Writer) WriteHeader(header *Header, transaction bool) error {
 		return writer.err
 	}
 
-	writer.currDataWriter, writer.err = newDataWriter(writer.db, id, writer.blocksize, transaction)
+	var dataWriter *dataWriter
+	dataWriter, writer.err = newDataWriter(writer.db, id, writer.blocksize, transaction)
 	if writer.err != nil {
 		return writer.err
 	}
-	writer.currWriter = writer.currDataWriter
+	writer.currWriters = append(writer.currWriters, dataWriter)
+	currWriterId := 0
+	writer.currDataWriter = dataWriter
 
+	var currWriter io.WriteCloser
 	if header.Encryption {
 		key, err := writer.createFileEncryptionKey(id)
 		if err != nil {
 			return err
 		}
 		var params encdec.Params
-		writer.currEncryptionWriter, writer.err = encdec.NewWriter(key, writer.currWriter, &params)
+		currWriter, writer.err = encdec.NewWriter(key, writer.currWriters[currWriterId], &params)
 		if writer.err != nil {
 			return writer.err
 		}
-		writer.currWriter = writer.currEncryptionWriter
-	} else {
-		writer.currEncryptionWriter = nil
+		writer.currWriters = append(writer.currWriters, currWriter)
+		currWriterId++
 	}
 
 	if header.Compression != 0 {
-		writer.currCompressionWriter, writer.err = zstd.NewWriter(
-			writer.currWriter,
+		currWriter, writer.err = zstd.NewWriter(
+			writer.currWriters[currWriterId],
 			zstd.WithEncoderLevel(header.Compression),
 		)
-		writer.currWriter = writer.currCompressionWriter
-	} else {
-		writer.currCompressionWriter = nil
+		if writer.err != nil {
+			return writer.err
+		}
+		writer.currWriters = append(writer.currWriters, currWriter)
+		currWriterId++
 	}
 
 	return writer.err
@@ -319,15 +313,13 @@ func (writer *Writer) WriteFile(header *Header, filepath string) (err error) {
 	}()
 
 	var read int64
-	read, writer.err = io.Copy(writer.currWriter, file)
+	read, writer.err = io.Copy(writer.currWriters[len(writer.currWriters)-1], file)
 	writer.currBytesRead = int(read)
 	if writer.err != nil {
 		return writer.err
 	}
 
-	writer.err = writer.flush()
-	writer.currDataWriter = nil
-	return writer.err
+	return writer.flush()
 }
 
 // Write writes the current file in the container, implementing
@@ -338,7 +330,7 @@ func (writer *Writer) Write(p []byte) (int, error) {
 	}
 
 	var read int
-	read, writer.err = writer.currWriter.Write(p)
+	read, writer.err = writer.currWriters[len(writer.currWriters)-1].Write(p)
 	writer.currBytesRead += read
 	return read, writer.err
 }

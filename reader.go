@@ -22,9 +22,16 @@ const (
 
 	queryEncryptionKeyParams = `SELECT params FROM encryption_key_params`
 
+	queryFileEncryptionKeyIdAny = `SELECT id FROM encryption_metadata LIMIT 1`
+
 	queryFileEncryptionKeyById = `SELECT key FROM encryption_metadata WHERE id = ?`
 
 	queryDataById = `SELECT data.data FROM data WHERE id = ? ORDER BY block_id ASC`
+)
+
+var (
+	ErrWrongPassword = errors.New("wrong password provided")
+	ErrNotEncrypted  = errors.New("provided password from unencrypted container")
 )
 
 type Reader struct {
@@ -40,7 +47,7 @@ func (reader *Reader) readEncryptionKey(password []byte) error {
 	switch {
 	case reader.err == nil:
 	case errors.Is(reader.err, sql.ErrNoRows):
-		reader.err = nil
+		reader.err = ErrNotEncrypted
 		return nil
 
 	default:
@@ -57,6 +64,22 @@ func (reader *Reader) readEncryptionKey(password []byte) error {
 	return reader.err
 }
 
+func (reader *Reader) verifyPassword() error {
+	var id int
+	reader.err = reader.db.QueryRow(queryFileEncryptionKeyIdAny).Scan(&id)
+	if reader.err != nil {
+		return reader.err
+	}
+
+	_, err := reader.fileEncryptionKey(id)
+	if err != nil {
+		reader.err = ErrWrongPassword
+		return reader.err
+	}
+
+	return nil
+}
+
 func NewReader(databasePath string, databaseArgs string, password []byte) (*Reader, error) {
 	reader := new(Reader)
 
@@ -66,6 +89,11 @@ func NewReader(databasePath string, databaseArgs string, password []byte) (*Read
 	}
 
 	err := reader.readEncryptionKey(password)
+	if err != nil {
+		return nil, err
+	}
+
+	err = reader.verifyPassword()
 	if err != nil {
 		return nil, err
 	}
