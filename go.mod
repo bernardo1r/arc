@@ -1,4 +1,4 @@
-module arc
+module github.com/bernardo1r/arc
 
 go 1.22.2
 

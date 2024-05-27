@@ -1,14 +1,16 @@
 package main
 
 import (
-	"arc"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"time"
+
+	"github.com/bernardo1r/arc"
 
 	"github.com/klauspost/compress/zstd"
 	_ "github.com/mattn/go-sqlite3"
@@ -66,6 +68,13 @@ func createOrTruncateFolder(folderpath string) error {
 }
 
 func main() {
+	file, err := os.Create("cmd/default.pgo")
+	checkError(err)
+	defer file.Close()
+	err = pprof.StartCPUProfile(file)
+	checkError(err)
+	defer pprof.StopCPUProfile()
+
 	log.SetFlags(0)
 	flag.Usage = func() {
 		log.Println(usage)
