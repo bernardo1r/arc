@@ -47,6 +47,8 @@ const encryptionKeysize = 32
 //go:embed ddl.sql
 var queryDDL []byte
 
+const databaseArgs = "?_foreign_keys=on"
+
 // ErrWriterClosed is returned when Writer is used after closed.
 var (
 	ErrWriterClosed  = errors.New("writer closed")
@@ -113,13 +115,13 @@ type Writer struct {
 	err            error
 }
 
-func prepareDB(databasePath string, databaseArgs string) (*sql.DB, error) {
+func prepareDB(databasePath string) (*sql.DB, error) {
 	err := os.Remove(databasePath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", "file:"+databasePath+"?"+databaseArgs)
+	db, err := sql.Open("sqlite3", "file:"+databasePath+databaseArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -145,10 +147,10 @@ func (writer *Writer) createEncryptionKey(password []byte) error {
 }
 
 // NewWriter creates a new Writer and a container file with name databasePath.
-func NewWriter(databasePath string, databaseArgs string, blocksize int, password []byte) (*Writer, error) {
+func NewWriter(databasePath string, blocksize int, password []byte) (*Writer, error) {
 	writer := new(Writer)
 	writer.blocksize = blocksize
-	writer.db, writer.err = prepareDB(databasePath, databaseArgs)
+	writer.db, writer.err = prepareDB(databasePath)
 	if writer.err != nil {
 		return nil, writer.err
 	}

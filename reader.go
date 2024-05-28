@@ -30,8 +30,9 @@ const (
 )
 
 var (
-	ErrWrongPassword = errors.New("wrong password provided")
-	ErrNotEncrypted  = errors.New("provided password from unencrypted container")
+	ErrNoFileSelected = errors.New("no file selected for reading")
+	ErrWrongPassword  = errors.New("wrong password provided")
+	ErrNotEncrypted   = errors.New("provided password from unencrypted container")
 )
 
 type Reader struct {
@@ -80,7 +81,7 @@ func (reader *Reader) verifyPassword() error {
 	return nil
 }
 
-func NewReader(databasePath string, databaseArgs string, password []byte) (*Reader, error) {
+func NewReader(databasePath string, password []byte) (*Reader, error) {
 	reader := new(Reader)
 
 	reader.db, reader.err = sql.Open("sqlite3", "file:"+databasePath+"?"+databaseArgs)
@@ -101,8 +102,15 @@ func NewReader(databasePath string, databaseArgs string, password []byte) (*Read
 	return reader, nil
 }
 
+func (reader *Reader) checkError() bool {
+	if reader.err == nil || errors.Is(reader.err, io.EOF) {
+		return false
+	}
+	return true
+}
+
 func (reader *Reader) Files() (files map[string]*Header, err error) {
-	if reader.err != nil {
+	if reader.checkError() {
 		return nil, reader.err
 	}
 
@@ -163,7 +171,7 @@ func (reader *Reader) fileEncryptionKey(id int) ([]byte, error) {
 }
 
 func (reader *Reader) Open(id int, transaction bool) error {
-	if reader.err != nil {
+	if reader.checkError() {
 		return reader.err
 	}
 
@@ -202,7 +210,7 @@ func (reader *Reader) Open(id int, transaction bool) error {
 }
 
 func (reader *Reader) ReadToFile(id int, filepath string) (err error) {
-	if reader.err != nil {
+	if reader.checkError() {
 		return reader.err
 	}
 
@@ -232,6 +240,10 @@ func (reader *Reader) ReadToFile(id int, filepath string) (err error) {
 func (reader *Reader) Read(p []byte) (int, error) {
 	if reader.err != nil {
 		return 0, reader.err
+	}
+
+	if reader.currReader == nil {
+		return 0, ErrNoFileSelected
 	}
 
 	var read int

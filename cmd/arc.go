@@ -18,13 +18,13 @@ import (
 
 const (
 	dbExtesion = ".arc"
-	dbArgs     = "_foreign_keys=on"
 )
 
 const usage = `Usage: arc [INPUT_FOLDER]
 
-Put all files of the provided folder into an arc file.
-Only files in the root folder will be added.`
+This executable is a demo of the library. It will put all files of the provided
+directory into an arc container, only files in the root directory will be added.
+Then, it 'extracts' the container to a new folder.`
 
 func checkError(err error) {
 	if err != nil {
@@ -97,7 +97,6 @@ func main() {
 	start := time.Now()
 	builder, err := arc.NewBuilder(
 		filepath.Base(folderPath)+dbExtesion,
-		dbArgs,
 		arc.WithCompressionLevel(zstd.SpeedBetterCompression),
 		arc.WithPassword([]byte("hello motto")),
 	)
@@ -118,7 +117,6 @@ func main() {
 	start = time.Now()
 	reader, err := arc.NewReader(
 		filepath.Base(folderPath)+dbExtesion,
-		dbArgs,
 		[]byte("hello motto"),
 	)
 	checkError(err)

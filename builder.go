@@ -42,7 +42,7 @@ func WithPassword(password []byte) BuilderOption {
 
 // NewBuilder creates a new Builder and a container with name databasePath
 // and the provided options.
-func NewBuilder(databasePath string, databaseArgs string, options ...BuilderOption) (*Builder, error) {
+func NewBuilder(databasePath string, options ...BuilderOption) (*Builder, error) {
 	builder := new(Builder)
 	builder.blockSize = DefaultBlocksize
 	for _, option := range options {
@@ -50,7 +50,7 @@ func NewBuilder(databasePath string, databaseArgs string, options ...BuilderOpti
 	}
 
 	var err error
-	builder.writer, err = NewWriter(databasePath, databaseArgs, DefaultBlocksize, builder.password)
+	builder.writer, err = NewWriter(databasePath, DefaultBlocksize, builder.password)
 	return builder, err
 }
 
