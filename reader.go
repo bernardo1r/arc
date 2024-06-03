@@ -2,9 +2,7 @@ package arc
 
 import (
 	"bytes"
-	"crypto/cipher"
 	"database/sql"
-	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -12,7 +10,6 @@ import (
 
 	"github.com/bernardo1r/encdec"
 	"github.com/klauspost/compress/zstd"
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 const (
@@ -27,12 +24,6 @@ const (
 	queryFileEncryptionKeyById = `SELECT key FROM encryption_metadata WHERE id = ?`
 
 	queryDataById = `SELECT data.data FROM data WHERE id = ? ORDER BY block_id ASC`
-)
-
-var (
-	ErrNoFileSelected = errors.New("no file selected for reading")
-	ErrWrongPassword  = errors.New("wrong password provided")
-	ErrNotEncrypted   = errors.New("provided password from unencrypted container")
 )
 
 type Reader struct {
@@ -72,7 +63,7 @@ func (reader *Reader) verifyPassword() error {
 		return reader.err
 	}
 
-	_, err := reader.fileEncryptionKey(id)
+	_, _, err := reader.fileEncryptionKeys(id)
 	if err != nil {
 		reader.err = ErrWrongPassword
 		return reader.err
@@ -89,17 +80,11 @@ func NewReader(databasePath string, password []byte) (*Reader, error) {
 		return nil, reader.err
 	}
 
-	err := reader.readEncryptionKey(password)
-	if err != nil {
-		return nil, err
+	if password == nil {
+		return reader, nil
 	}
 
-	err = reader.verifyPassword()
-	if err != nil {
-		return nil, err
-	}
-
-	return reader, nil
+	return reader, reader.SetPassword(password)
 }
 
 func (reader *Reader) checkError() bool {
@@ -107,6 +92,36 @@ func (reader *Reader) checkError() bool {
 		return false
 	}
 	return true
+}
+
+func (reader *Reader) SetPassword(password []byte) error {
+	if reader.checkError() {
+		return reader.err
+	}
+
+	reader.err = reader.readEncryptionKey(password)
+	if reader.err != nil {
+		return reader.err
+	}
+
+	return reader.verifyPassword()
+}
+
+func (reader *Reader) fileEncryptionKeys(id int) (filenameKey []byte, fileDataKey []byte, err error) {
+	var keyEncrypted []byte
+	reader.err = reader.db.QueryRow(queryFileEncryptionKeyById, id).Scan(&keyEncrypted)
+	if reader.err != nil {
+		return nil, nil, reader.err
+	}
+
+	var fileMasterKey []byte
+	fileMasterKey, reader.err = readFileKey(keyEncrypted, id, reader.encryptionKey)
+	if reader.err != nil {
+		return nil, nil, reader.err
+	}
+
+	filenameKey, fileDataKey = stretchKey(fileMasterKey)
+	return filenameKey, fileDataKey, nil
 }
 
 func (reader *Reader) Files() (files map[string]*Header, err error) {
@@ -129,8 +144,8 @@ func (reader *Reader) Files() (files map[string]*Header, err error) {
 
 	files = make(map[string]*Header)
 	for rows.Next() {
-		var modTime int64
 		header := new(Header)
+		var modTime int64
 		reader.err = rows.Scan(
 			&header.Id,
 			&header.Name,
@@ -142,32 +157,27 @@ func (reader *Reader) Files() (files map[string]*Header, err error) {
 		if reader.err != nil {
 			return nil, reader.err
 		}
+
 		header.ModTime = time.Unix(modTime, 0)
+		if header.Encryption {
+			if reader.encryptionKey == nil {
+				continue
+			}
+
+			filenameKey, _, err := reader.fileEncryptionKeys(header.Id)
+			if err != nil {
+				return nil, err
+			}
+			header.Name, reader.err = decryptFilename(header.Name, filenameKey)
+			if reader.err != nil {
+				return nil, reader.err
+			}
+		}
 
 		files[header.Name] = header
 	}
 
 	return files, nil
-}
-
-func (reader *Reader) fileEncryptionKey(id int) ([]byte, error) {
-	var keyEncrypted []byte
-	reader.err = reader.db.QueryRow(queryFileEncryptionKeyById, id).Scan(&keyEncrypted)
-	if reader.err != nil {
-		return nil, reader.err
-	}
-
-	var aead cipher.AEAD
-	aead, reader.err = chacha20poly1305.New(reader.encryptionKey)
-	if reader.err != nil {
-		return nil, reader.err
-	}
-
-	nonce := make([]byte, chacha20poly1305.NonceSize)
-	binary.BigEndian.PutUint64(nonce, uint64(id))
-	var key []byte
-	key, reader.err = aead.Open(nil, nonce, keyEncrypted, nil)
-	return key, reader.err
 }
 
 func (reader *Reader) Open(id int, transaction bool) error {
@@ -187,13 +197,18 @@ func (reader *Reader) Open(id int, transaction bool) error {
 	}
 
 	if encrypted {
-		var key []byte
-		key, reader.err = reader.fileEncryptionKey(id)
+		if reader.encryptionKey == nil {
+			reader.err = ErrEmptyPassword
+			return reader.err
+		}
+
+		var dataKey []byte
+		_, dataKey, reader.err = reader.fileEncryptionKeys(id)
 		if reader.err != nil {
 			return reader.err
 		}
 		var params encdec.Params
-		reader.currReader, reader.err = encdec.NewReader(key, reader.currReader, &params)
+		reader.currReader, reader.err = encdec.NewReader(dataKey, reader.currReader, &params)
 		if reader.err != nil {
 			return reader.err
 		}

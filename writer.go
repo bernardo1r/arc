@@ -2,11 +2,8 @@ package arc
 
 import (
 	"bytes"
-	"crypto/cipher"
-	"crypto/rand"
 	"database/sql"
 	_ "embed"
-	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -14,7 +11,6 @@ import (
 
 	"github.com/bernardo1r/encdec"
 	"github.com/klauspost/compress/zstd"
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 const (
@@ -35,7 +31,9 @@ const (
 
 	queryIdByName = `SELECT id FROM metadata WHERE name = ?`
 
-	queryUpdateMetadata = `UPDATE metadata SET size = ?, blocks = ? WHERE id = ?`
+	queryUpdateFileSize = `UPDATE metadata SET size = ?, blocks = ? WHERE id = ?`
+
+	queryUpdateFilename = `UPDATE metadata SET name = ? WHERE id = ?`
 )
 
 // DefaultBlocksize is the default size, in bytes, of a file chunk
@@ -49,11 +47,30 @@ var queryDDL []byte
 
 const databaseArgs = "?_foreign_keys=on"
 
-// ErrWriterClosed is returned when Writer is used after closed.
 var (
-	ErrWriterClosed  = errors.New("writer closed")
-	ErrEmptyPassword = errors.New("attempt to encrypt file with no password")
-	ErrNoFilename    = errors.New("attempt to create file with no name")
+	// ErrWriterClosed is returned when Writer is used after closed.
+	ErrWriterClosed = errors.New("writer closed")
+
+	// ErrEmptyPassword is returned when a file have encryption enabled, but
+	// no password was provided.
+	ErrEmptyPassword = errors.New("encrypted marked file with no password provided")
+
+	// ErrNotEncrypted is returned when a file isn't marked for encryption, but
+	// a password was provided.
+	ErrNotEncrypted = errors.New("provided password from unencrypted container")
+
+	// ErrNoFilename is returned when is tried to create a file with no name.
+	ErrNoFilename = errors.New("attempt to create file with no name")
+
+	// ErrnoFileSelected is returned when reading a [Reader] with no file
+	// selected previously.
+	ErrNoFileSelected = errors.New("no file selected for reading")
+
+	// ErrWrongPassword is returned when providing the wrong password to an
+	// container with encrypted files.
+	ErrWrongPassword = errors.New("wrong password provided")
+
+	ErrPadding = errors.New("corrupted filename pad")
 )
 
 // Header represents a file in the arc file.
@@ -103,8 +120,8 @@ func (header *Header) check() error {
 }
 
 // Writer implements a arc container writer. [Writer.WriteHeader] initiates
-// a new file with the providaded [Header], and then Writer can be used as an
-// io.Writer.
+// a new file with the providaded [Header], and then the Writer can be
+// used as an io.Writer.
 type Writer struct {
 	blocksize      int
 	encryptionKey  []byte
@@ -178,7 +195,7 @@ func (writer *Writer) flush() error {
 	}
 
 	_, writer.err = writer.db.Exec(
-		queryUpdateMetadata,
+		queryUpdateFileSize,
 		writer.currBytesRead,
 		writer.currDataWriter.currBlock,
 		writer.currDataWriter.id,
@@ -189,33 +206,28 @@ func (writer *Writer) flush() error {
 	return writer.err
 }
 
-func (writer *Writer) createFileEncryptionKey(id int) ([]byte, error) {
+func (writer *Writer) prepareFileEncryption(header *Header) (fileDataKey []byte, err error) {
 	if writer.encryptionKey == nil {
 		return nil, ErrEmptyPassword
 	}
 
-	key := make([]byte, encryptionKeysize)
-	_, writer.err = rand.Read(key)
+	var encryptedKey, fileMasterKey []byte
+	encryptedKey, fileMasterKey, writer.err = generateFileMasterKey(writer.encryptionKey, header.Id)
+	_, writer.err = writer.db.Exec(queryInsertEncryptedMetadata, header.Id, encryptedKey)
 	if writer.err != nil {
 		return nil, writer.err
 	}
 
-	var aead cipher.AEAD
-	aead, writer.err = chacha20poly1305.New(writer.encryptionKey)
+	var filenameKey []byte
+	filenameKey, fileDataKey = stretchKey(fileMasterKey)
+	var encryptedFilename string
+	encryptedFilename, writer.err = encryptFilename(header.Name, filenameKey)
 	if writer.err != nil {
 		return nil, writer.err
 	}
+	_, writer.err = writer.db.Exec(queryUpdateFilename, encryptedFilename, header.Id)
 
-	nonce := make([]byte, chacha20poly1305.NonceSize)
-	binary.BigEndian.PutUint64(nonce, uint64(id))
-	encryptedKey := aead.Seal(nil, nonce, key, nil)
-
-	_, writer.err = writer.db.Exec(queryInsertEncryptedMetadata, id, encryptedKey)
-	if writer.err != nil {
-		return nil, writer.err
-	}
-
-	return key, nil
+	return fileDataKey, writer.err
 }
 
 // WriteHeader prepares the Writer for writing the file described by header.
@@ -250,6 +262,7 @@ func (writer *Writer) WriteHeader(header *Header, transaction bool) error {
 	if writer.err != nil {
 		return writer.err
 	}
+	header.Id = id
 
 	var dataWriter *dataWriter
 	dataWriter, writer.err = newDataWriter(writer.db, id, writer.blocksize, transaction)
@@ -262,10 +275,11 @@ func (writer *Writer) WriteHeader(header *Header, transaction bool) error {
 
 	var currWriter io.WriteCloser
 	if header.Encryption {
-		key, err := writer.createFileEncryptionKey(id)
+		key, err := writer.prepareFileEncryption(header)
 		if err != nil {
 			return err
 		}
+
 		var params encdec.Params
 		currWriter, writer.err = encdec.NewWriter(key, writer.currWriters[currWriterId], &params)
 		if writer.err != nil {
