@@ -50,7 +50,7 @@ func mustBeFolder(folderpath string) {
 
 func createOrTruncateFolder(folderpath string) error {
 
-	err := os.Mkdir(folderpath, 0666)
+	err := os.Mkdir(folderpath, 0775)
 	if err == nil {
 		return nil
 	}
@@ -61,7 +61,7 @@ func createOrTruncateFolder(folderpath string) error {
 			return err
 		}
 
-		err = os.Mkdir(folderpath, 0666)
+		err = os.Mkdir(folderpath, 0775)
 	}
 
 	return err
