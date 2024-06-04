@@ -75,7 +75,7 @@ func (reader *Reader) verifyPassword() error {
 func NewReader(databasePath string, password []byte) (*Reader, error) {
 	reader := new(Reader)
 
-	reader.db, reader.err = sql.Open("sqlite3", "file:"+databasePath+"?"+databaseArgs)
+	reader.db, reader.err = sql.Open("sqlite3", "file:"+databasePath+databaseArgs)
 	if reader.err != nil {
 		return nil, reader.err
 	}
