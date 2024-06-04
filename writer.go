@@ -57,7 +57,7 @@ var (
 
 	// ErrNotEncrypted is returned when a file isn't marked for encryption, but
 	// a password was provided.
-	ErrNotEncrypted = errors.New("provided password from unencrypted container")
+	ErrNotEncrypted = errors.New("password provided for unencrypted container")
 
 	// ErrNoFilename is returned when is tried to create a file with no name.
 	ErrNoFilename = errors.New("attempt to create file with no name")
@@ -172,14 +172,12 @@ func NewWriter(databasePath string, blocksize int, password []byte) (*Writer, er
 		return nil, writer.err
 	}
 
-	if password != nil {
-		err := writer.createEncryptionKey(password)
-		if err != nil {
-			return nil, err
-		}
+	if password == nil {
+		return writer, nil
 	}
 
-	return writer, nil
+	err := writer.createEncryptionKey(password)
+	return writer, err
 }
 
 func (writer *Writer) flush() error {

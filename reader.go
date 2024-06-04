@@ -40,7 +40,7 @@ func (reader *Reader) readEncryptionKey(password []byte) error {
 	case reader.err == nil:
 	case errors.Is(reader.err, sql.ErrNoRows):
 		reader.err = ErrNotEncrypted
-		return nil
+		return reader.err
 
 	default:
 		return reader.err
