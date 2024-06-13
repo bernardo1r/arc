@@ -30,6 +30,7 @@ type Reader struct {
 	currReader    io.Reader
 	encryptionKey []byte
 	db            *sql.DB
+	encrypted     bool
 	err           error
 }
 
@@ -80,6 +81,8 @@ func NewReader(databasePath string, password []byte) (*Reader, error) {
 		return nil, reader.err
 	}
 
+	row := reader.db.QueryRow(queryEncryptionKeyParams)
+	reader.encrypted = errors.Is(row.Err(), sql.ErrNoRows)
 	if password == nil {
 		return reader, nil
 	}
@@ -92,6 +95,10 @@ func (reader *Reader) checkError() bool {
 		return false
 	}
 	return true
+}
+
+func (reader *Reader) IsEncrypted() bool {
+	return reader.encrypted
 }
 
 func (reader *Reader) SetPassword(password []byte) error {
@@ -161,6 +168,7 @@ func (reader *Reader) Files() (files map[string]*Header, err error) {
 		header.ModTime = time.Unix(modTime, 0)
 		if header.Encryption {
 			if reader.encryptionKey == nil {
+				files[header.Name] = header
 				continue
 			}
 

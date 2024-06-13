@@ -68,7 +68,7 @@ var (
 
 	// ErrWrongPassword is returned when providing the wrong password to an
 	// container with encrypted files.
-	ErrWrongPassword = errors.New("wrong password provided")
+	ErrWrongPassword = errors.New("wrong password")
 
 	ErrPadding = errors.New("corrupted filename pad")
 )
