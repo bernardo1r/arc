@@ -1,6 +1,6 @@
 module github.com/bernardo1r/arc
 
-go 1.22.2
+go 1.22.4
 
 require (
 	github.com/bernardo1r/encdec v1.0.2
