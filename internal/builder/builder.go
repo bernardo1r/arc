@@ -1,4 +1,4 @@
-package arc
+package builder
 
 import (
 	"errors"
@@ -8,13 +8,14 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/bernardo1r/arc"
 	"github.com/klauspost/compress/zstd"
 )
 
 // Builder extend [Writer] providing an simpler
 // way to write files to a container.
 type Builder struct {
-	writer      *Writer
+	writer      *arc.Writer
 	blockSize   int
 	compression zstd.EncoderLevel
 	password    []byte
@@ -44,13 +45,13 @@ func WithPassword(password []byte) BuilderOption {
 // and the provided options.
 func NewBuilder(databasePath string, options ...BuilderOption) (*Builder, error) {
 	builder := new(Builder)
-	builder.blockSize = DefaultBlocksize
+	builder.blockSize = arc.DefaultBlocksize
 	for _, option := range options {
 		option(builder)
 	}
 
 	var err error
-	builder.writer, err = NewWriter(databasePath, DefaultBlocksize, builder.password)
+	builder.writer, err = arc.NewWriter(databasePath, arc.DefaultBlocksize, builder.password)
 	return builder, err
 }
 
@@ -58,7 +59,7 @@ func NewBuilder(databasePath string, options ...BuilderOption) (*Builder, error)
 // the builder's configuration.
 func (builder Builder) InsertFile(path string) error {
 	return builder.writer.WriteFile(
-		&Header{
+		&arc.Header{
 			Name:        filepath.Base(path),
 			Compression: builder.compression,
 			Encryption:  builder.password != nil,

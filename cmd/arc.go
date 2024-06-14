@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bernardo1r/arc"
+	"github.com/bernardo1r/arc/internal/builder"
 
 	"github.com/klauspost/compress/zstd"
 	_ "github.com/mattn/go-sqlite3"
@@ -95,17 +96,17 @@ func main() {
 	mustBeFolder(folderPath)
 
 	start := time.Now()
-	builder, err := arc.NewBuilder(
+	arcBuilder, err := builder.NewBuilder(
 		filepath.Base(folderPath)+dbExtesion,
-		arc.WithCompressionLevel(zstd.SpeedBetterCompression),
-		arc.WithPassword([]byte("hello motto")),
+		builder.WithCompressionLevel(zstd.SpeedBetterCompression),
+		builder.WithPassword([]byte("hello motto")),
 	)
 	checkError(err)
 
-	err = builder.InsertDir(folderPath)
+	err = arcBuilder.InsertDir(folderPath)
 	checkError(err)
 
-	err = builder.Close()
+	err = arcBuilder.Close()
 	checkError(err)
 	tot := time.Since(start)
 	fmt.Printf("Time to write to container: %v\n\n", tot)
